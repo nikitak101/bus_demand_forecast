@@ -1,0 +1,661 @@
+Yes. This section is mainly about **how you organize the data and build the data pipeline**.
+
+Think of it as:
+
+> **Raw data → Clean data → Useful ML data**
+
+Let's go point by point.
+
+---
+
+# 12. Why have TWO tables?
+
+You have two different types of information.
+
+## Table 1: `bus_trips_master.csv`
+
+This contains **one row for each bus trip**.
+
+Example:
+
+| trip_id | route       | departure_date | capacity | bus_type | price | holiday | final_bookings | final_occupancy |
+| ------- | ----------- | -------------- | -------: | -------- | ----: | ------- | -------------: | --------------: |
+| T001    | Mumbai-Pune | 30 Aug         |       40 | Sleeper  |   600 | No      |             37 |           92.5% |
+| T002    | Pune-Goa    | 30 Aug         |       40 | Seater   |   900 | Yes     |             35 |           87.5% |
+| T003    | Nanded-Pune | 30 Aug         |       40 | Sleeper  |   700 | No      |             22 |             55% |
+
+Notice:
+
+**T001 appears only once.**
+
+This table answers:
+
+> **"What happened to this trip overall?"**
+
+---
+
+# Table 2: `bus_booking_daily.csv`
+
+This contains **multiple rows for the same trip**, because we track it every day.
+
+Example:
+
+| trip_id | booking_date | days_left | seats_booked | occupancy_pct |
+| ------- | ------------ | --------: | -----------: | ------------: |
+| T001    | 10 Aug       |        20 |            3 |          7.5% |
+| T001    | 11 Aug       |        19 |            4 |           10% |
+| T001    | 12 Aug       |        18 |            5 |         12.5% |
+| T001    | 13 Aug       |        17 |            6 |           15% |
+| T001    | ...          |       ... |          ... |           ... |
+| T001    | 25 Aug       |         5 |           30 |           75% |
+| T001    | 30 Aug       |         0 |           37 |         92.5% |
+
+Now **T001 appears many times**.
+
+This table answers:
+
+> **"How did this trip fill up over time?"**
+
+---
+
+# Why not put everything into one table?
+
+You technically could, but it becomes messy.
+
+Think:
+
+```text
+MASTER TABLE
+1 row = 1 trip
+```
+
+while:
+
+```text
+DAILY TABLE
+1 row = 1 trip + 1 day
+```
+
+They have different **grains**.
+
+### Grain means:
+
+> **What does one row represent?**
+
+| Table               | One row represents             |
+| ------------------- | ------------------------------ |
+| `bus_trips_master`  | One complete trip              |
+| `bus_booking_daily` | One trip on one particular day |
+
+This is an important **data engineering concept**.
+
+---
+
+# Why are the two tables useful for different ML problems?
+
+### Problem 1 — Final occupancy prediction
+
+You want:
+
+> "Will this bus be 80%, 90%, or 100% full?"
+
+You can use the master table.
+
+```text
+Route
+Price
+Bus type
+Holiday
+Capacity
+...
+       ↓
+ML Model
+       ↓
+Final occupancy
+```
+
+---
+
+### Problem 2 — Booking trajectory prediction
+
+This is your more interesting problem:
+
+> "How many seats will be booked 15, 10, 5, and 1 day before departure?"
+
+You need the daily table.
+
+```text
+Trip
+ ↓
+Daily booking history
+ ↓
+ML Model
+ ↓
+Future booking trajectory
+```
+
+So the split makes sense because **these are two different prediction problems**.
+
+---
+
+# 13. What are Bronze, Silver and Gold?
+
+This is the common **Data Engineering / Lakehouse architecture**.
+
+Remember:
+
+```text
+BRONZE
+   ↓
+SILVER
+   ↓
+GOLD
+```
+
+Think of it like cooking.
+
+### 🥔 Bronze = Raw ingredients
+
+### 🍳 Silver = Cleaned/prepared ingredients
+
+### 🍽️ Gold = Finished meal
+
+---
+
+# Bronze
+
+Bronze contains **raw data**.
+
+Suppose your system receives booking events:
+
+```text
+T001, 10 Aug, seat booked
+T001, 10 Aug, seat booked
+T001, 11 Aug, seat booked
+T001, 11 Aug, seat cancelled
+```
+
+You don't modify much.
+
+You preserve the raw information.
+
+```text
+RAW
+ ↓
+Bronze
+```
+
+---
+
+# Silver
+
+Now you clean and transform it.
+
+For example:
+
+```text
+Booking date → proper date format
+Trip ID → proper string
+Seats → integer
+Capacity → integer
+```
+
+Then calculate:
+
+[
+occupancy_pct =
+\frac{seats_booked}{capacity}\times100
+]
+
+Example:
+
+```text
+Seats booked = 25
+Capacity = 40
+```
+
+Therefore:
+
+[
+25/40\times100 = 62.5%
+]
+
+Now you have:
+
+```text
+trip_id
+booking_date
+days_left
+seats_booked
+occupancy_pct
+```
+
+That's your **Silver table**.
+
+---
+
+# Gold
+
+Gold is where you create **business/ML-ready data**.
+
+For example, instead of having every single day:
+
+```text
+T001 | 20 days | 3 seats
+T001 | 19 days | 4 seats
+T001 | 18 days | 5 seats
+...
+```
+
+you might create:
+
+| trip_id | occupancy_20d | occupancy_15d | occupancy_10d | occupancy_5d | final_occupancy |
+| ------- | ------------: | ------------: | ------------: | -----------: | --------------: |
+| T001    |          7.5% |           20% |           45% |          75% |           92.5% |
+| T002    |            5% |           18% |           40% |          70% |           87.5% |
+
+This is much easier for an ML model.
+
+You could also calculate:
+
+### Booking velocity
+
+How quickly are bookings increasing?
+
+For example:
+
+```text
+10 Aug → 5 seats
+15 Aug → 10 seats
+```
+
+Then:
+
+```text
+Booking velocity = +5 seats / 5 days
+                 = 1 seat/day
+```
+
+Other Gold features could be:
+
+* occupancy at 20 days
+* occupancy at 15 days
+* occupancy at 10 days
+* occupancy at 5 days
+* bookings in last 3 days
+* average booking velocity
+* cancellation rate
+* price ratio
+
+---
+
+# So your complete pipeline becomes
+
+```text
+                 RAW BOOKING EVENTS
+                        ↓
+                    BRONZE
+                        ↓
+                Data Cleaning
+                        ↓
+                    SILVER
+                        ↓
+             Feature Engineering
+                        ↓
+                     GOLD
+                        ↓
+                  ML MODEL
+                        ↓
+                  PREDICTION
+                        ↓
+                   DASHBOARD
+```
+
+---
+
+# 14. Why use a fixed random seed?
+
+This one is very simple.
+
+Your synthetic data uses randomness.
+
+For example:
+
+```text
+noise = random number
+```
+
+Without a fixed seed:
+
+### First run
+
+```text
+T001 → 32 bookings
+```
+
+### Second run
+
+```text
+T001 → 36 bookings
+```
+
+### Third run
+
+```text
+T001 → 29 bookings
+```
+
+Every time you run the generator, you get different data.
+
+That's annoying when developing an ML project.
+
+---
+
+## Fixed seed
+
+You say:
+
+```text
+random.seed(42)
+```
+
+Now:
+
+```text
+Run 1 → 32 bookings
+Run 2 → 32 bookings
+Run 3 → 32 bookings
+```
+
+Every time.
+
+So:
+
+> **Fixed seed = reproducibility.**
+
+This is useful because you can compare:
+
+```text
+Model V1 → 87% performance
+Model V2 → 90% performance
+```
+
+on exactly the **same dataset**.
+
+Otherwise you wouldn't know whether the improvement came from your model or from a different random dataset.
+
+---
+
+# 15. What if we need 10× or 100× more data?
+
+Suppose today you have:
+
+```text
+4,000 trips
+```
+
+and approximately:
+
+```text
+120,000 daily rows
+```
+
+That's already plenty for a portfolio project.
+
+But imagine you need:
+
+```text
+40,000 trips
+```
+
+or:
+
+```text
+4,000,000 trips
+```
+
+Then you need to think about performance.
+
+---
+
+## Current approach
+
+Maybe you have:
+
+```python
+for trip in trips:
+    generate_booking_curve(trip)
+```
+
+This processes trips one by one.
+
+That's easy to understand, but can become slow.
+
+---
+
+## Better approach: NumPy/Pandas
+
+Instead of:
+
+```text
+Trip 1 → calculate
+Trip 2 → calculate
+Trip 3 → calculate
+...
+```
+
+you calculate many trips together.
+
+That's called **vectorization**.
+
+---
+
+## Even bigger: Spark
+
+If you have millions of records:
+
+```text
+Python
+   ↓
+Pandas
+   ↓
+Too much data
+   ↓
+PySpark
+   ↓
+Distributed processing
+```
+
+Multiple machines/executors can process the data.
+
+So you could say in an interview:
+
+> "For the portfolio version, I used Python/Pandas because the dataset was only around 120K rows. If the data grew to millions of trips, I would vectorize the generator or move the processing to Spark."
+
+That's a very reasonable answer.
+
+---
+
+# 16. What are data quality checks?
+
+Before giving data to the ML model, you need to make sure the data isn't broken.
+
+Think:
+
+> **"Can I trust this dataset?"**
+
+---
+
+## Check 1 — Occupancy can't exceed capacity
+
+Suppose:
+
+```text
+Capacity = 40
+Bookings = 45
+```
+
+❌ Impossible.
+
+You need:
+
+```text
+Bookings ≤ Capacity
+```
+
+So you can enforce:
+
+```text
+max bookings = capacity
+```
+
+---
+
+# Check 2 — Booking numbers should generally increase
+
+Before cancellations, you shouldn't have:
+
+```text
+10 Aug → 5 bookings
+11 Aug → 9 bookings
+12 Aug → 7 bookings ❌
+```
+
+Bookings shouldn't spontaneously decrease.
+
+It should generally be:
+
+```text
+5
+ ↓
+9
+ ↓
+12
+ ↓
+18
+ ↓
+25
+```
+
+Cancellations can later cause:
+
+```text
+25
+ ↓
+24
+```
+
+So you check **cumulative monotonicity before cancellations**.
+
+---
+
+# Check 3 — Does every trip actually exist?
+
+Suppose your daily table contains:
+
+```text
+T001
+T002
+T003
+T999
+```
+
+But your master table only has:
+
+```text
+T001
+T002
+T003
+```
+
+Then:
+
+```text
+T999 ❌
+```
+
+is an invalid reference.
+
+You need:
+
+```text
+Every trip_id in daily
+        ↓
+Must exist in master
+```
+
+This is called **referential integrity**.
+
+---
+
+# Check 4 — Check distributions
+
+You should also ask:
+
+> "Does my generated data make sense overall?"
+
+For example:
+
+```text
+Holiday occupancy = 76%
+Normal occupancy  = 63%
+```
+
+Maybe that's reasonable.
+
+But if you get:
+
+```text
+Holiday occupancy = 99%
+Normal occupancy  = 5%
+```
+
+you should investigate.
+
+You can check distributions by:
+
+* route tier
+* holiday/non-holiday
+* bus type
+* weekday/weekend
+* price range
+
+---
+
+# The complete architecture to remember
+
+```text
+                 REFERENCE DATA
+              Route / Fare / Bus
+                       │
+                       ↓
+              ┌─────────────────┐
+              │     BRONZE      │
+              │  Raw bookings   │
+              └────────┬────────┘
+                       ↓
+              ┌─────────────────┐
+              │     SILVER      │
+              │ Clean daily     │
+              │ booking data    │
+              └────────┬────────┘
+                       ↓
+              ┌─────────────────┐
+              │      GOLD       │
+              │ ML features     │
+              │ booking velocity│
+              │ occupancy @ 20d │
+              │ occupancy @ 10d │
+              │ etc.            │
+              └────────┬────────┘
+                       ↓
+                   ML MODEL
+                       ↓
+              Booking Forecast
+                       ↓
+                  React UI
+```
+
+### The easiest way to remember Section 3:
+
+> **Master = one row per trip. Daily = one row per trip per day. Bronze = raw. Silver = clean. Gold = ML/business ready. Seed = reproducibility. Quality checks = make sure the data makes sense.**

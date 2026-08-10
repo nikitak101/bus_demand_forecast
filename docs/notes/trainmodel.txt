@@ -1,0 +1,847 @@
+Yes. This is **Step 9 — ML model training and comparison**.
+
+The easiest way to understand this code is:
+
+> **Gold data → split trips → train 3 models → make predictions → compare errors → find important features → save the models.**
+
+---
+
+# 1. What are we trying to predict?
+
+From your Gold table:
+
+### Input/features `X`
+
+Things like:
+
+```text
+days_left
+current_occupancy_pct
+booking_velocity_3d
+booking_velocity_7d
+price_ratio
+capacity
+distance_km
+holiday
+bus_type
+weekday
+route popularity
+...
+```
+
+### Target `y`
+
+```text
+final_occupancy_pct
+```
+
+So the ML problem is:
+
+```text
+Current information
+        ↓
+      ML model
+        ↓
+Predicted final occupancy
+```
+
+Example:
+
+```text
+10 days left
+60% currently occupied
+2 seats/day booking velocity
+AC Sleeper
+₹700
+holiday = yes
+high-demand route
+        ↓
+      XGBoost
+        ↓
+Predicted final occupancy = 91%
+```
+
+---
+
+# 2. First: Load the Gold dataset
+
+```python
+gold = pd.read_csv(GOLD_INPUT)
+```
+
+It loads:
+
+```text
+bus_features_gold.csv
+```
+
+This is the dataset you created in the previous step.
+
+---
+
+# 3. Why do we split by `trip_id`?
+
+This is **one of the most important parts of the code.**
+
+Suppose T001 has:
+
+| trip_id | days_left | occupancy |
+| ------- | --------: | --------: |
+| T001    |        20 |       30% |
+| T001    |        15 |       45% |
+| T001    |        10 |       60% |
+| T001    |         5 |       80% |
+
+If you randomly split rows:
+
+```text
+TRAIN:
+T001 → 20 days
+T001 → 15 days
+
+TEST:
+T001 → 10 days
+T001 → 5 days
+```
+
+The model has already seen T001 during training.
+
+That's not a proper test.
+
+So instead:
+
+```text
+TRAIN
+T001
+T002
+T003
+T004
+...
+
+TEST
+T100
+T101
+T102
+...
+```
+
+**Every snapshot belonging to one trip stays together.**
+
+---
+
+# 4. This function performs that split
+
+```python
+def trip_level_split(gold, test_size=0.2):
+```
+
+First:
+
+```python
+unique_trips = gold["trip_id"].unique()
+```
+
+Suppose:
+
+```text
+4000 unique trips
+```
+
+Then:
+
+```python
+train_test_split(
+    unique_trips,
+    test_size=0.2
+)
+```
+
+gives approximately:
+
+```text
+80% trips → training
+20% trips → testing
+```
+
+For example:
+
+```text
+3200 trips → TRAIN
+800 trips  → TEST
+```
+
+Then:
+
+```python
+train = gold[gold["trip_id"].isin(train_ids)]
+test = gold[gold["trip_id"].isin(test_ids)]
+```
+
+puts **all rows of each trip** into the appropriate set.
+
+---
+
+# 5. This assertion checks for leakage
+
+```python
+assert set(train["trip_id"]).isdisjoint(
+    set(test["trip_id"])
+)
+```
+
+It means:
+
+> There must be ZERO trip IDs appearing in both train and test.
+
+If there is overlap, the program stops with:
+
+```text
+trip leakage between train/test!
+```
+
+That's a very good check.
+
+---
+
+# 6. Now separate Features and Target
+
+You have:
+
+```python
+NON_FEATURE_COLS = [
+    "trip_id",
+    "route",
+    "final_occupancy_pct"
+]
+```
+
+Why remove these?
+
+### `trip_id`
+
+It's just an identifier.
+
+The model shouldn't learn:
+
+```text
+T001 → high demand
+T002 → low demand
+```
+
+### `route`
+
+Your code removes the raw route string because ML models can't directly use:
+
+```text
+Mumbai → Pune
+```
+
+You are instead using engineered information such as:
+
+```text
+route_avg_occupancy_loo
+```
+
+### `final_occupancy_pct`
+
+This is the **answer**.
+
+It cannot be given to the model as an input.
+
+Otherwise:
+
+```text
+Model input = final occupancy
+Model output = final occupancy
+```
+
+That would be cheating/data leakage.
+
+---
+
+# 7. Create X and y
+
+```python
+feature_cols = [
+    c for c in gold.columns
+    if c not in NON_FEATURE_COLS
+]
+```
+
+So:
+
+```text
+X = features
+y = target
+```
+
+Then:
+
+```python
+X_train = train[feature_cols]
+y_train = train["final_occupancy_pct"]
+```
+
+and:
+
+```python
+X_test = test[feature_cols]
+y_test = test["final_occupancy_pct"]
+```
+
+Think:
+
+```text
+X_train
+   ↓
+Questions/information
+
+y_train
+   ↓
+Correct answers
+```
+
+The model learns:
+
+```text
+X_train → y_train
+```
+
+Then we test:
+
+```text
+X_test → prediction
+```
+
+and compare prediction with:
+
+```text
+y_test
+```
+
+---
+
+# 8. Why train 3 different models?
+
+You don't know beforehand which model will work best.
+
+So you test:
+
+### Model 1 — Linear Regression
+
+```text
+Simple baseline
+```
+
+It asks:
+
+> Can the relationship between features and final occupancy be approximated using mostly straight-line relationships?
+
+---
+
+### Model 2 — Random Forest
+
+Random Forest creates many decision trees.
+
+Conceptually:
+
+```text
+Tree 1 ─┐
+Tree 2 ─┤
+Tree 3 ─┤
+Tree 4 ─┤ → Average prediction
+...     │
+Tree 300┘
+```
+
+It can capture nonlinear relationships.
+
+For example:
+
+```text
+If days_left < 7
+AND current occupancy > 70%
+AND route popularity = high
+→ very high final occupancy
+```
+
+---
+
+### Model 3 — XGBoost
+
+XGBoost builds trees sequentially.
+
+Conceptually:
+
+```text
+Tree 1
+  ↓
+Find mistakes
+  ↓
+Tree 2 fixes mistakes
+  ↓
+Tree 3 fixes remaining mistakes
+  ↓
+...
+  ↓
+Final prediction
+```
+
+It's often very strong for tabular datasets like yours.
+
+---
+
+# 9. Linear Regression code
+
+```python
+lr = LinearRegression()
+lr.fit(X_train, y_train)
+```
+
+This means:
+
+> Learn the relationship between my features and final occupancy.
+
+Then:
+
+```python
+pred_lr = lr.predict(X_test)
+```
+
+Now the model predicts final occupancy for unseen trips.
+
+Example:
+
+```text
+Actual:     90%
+Predicted:  86%
+```
+
+---
+
+# 10. Random Forest
+
+```python
+rf = RandomForestRegressor(
+    n_estimators=300,
+    max_depth=10,
+    min_samples_leaf=5,
+    random_state=42,
+    n_jobs=-1
+)
+```
+
+### `n_estimators=300`
+
+Create 300 trees.
+
+### `max_depth=10`
+
+Don't let each tree become excessively complicated.
+
+### `min_samples_leaf=5`
+
+Each leaf must have at least 5 samples.
+
+This helps reduce overfitting.
+
+Then:
+
+```python
+rf.fit(X_train, y_train)
+```
+
+and:
+
+```python
+pred_rf = rf.predict(X_test)
+```
+
+---
+
+# 11. XGBoost
+
+```python
+xgb = XGBRegressor(
+    n_estimators=400,
+    max_depth=5,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8
+)
+```
+
+Don't worry about memorizing all these parameters right now.
+
+Conceptually:
+
+```text
+n_estimators
+→ number of boosting trees
+
+max_depth
+→ complexity of each tree
+
+learning_rate
+→ how strongly each new tree changes the model
+
+subsample
+→ use only part of training rows for each boosting step
+
+colsample_bytree
+→ use only some features for each tree
+```
+
+Then:
+
+```python
+xgb.fit(X_train, y_train)
+```
+
+and:
+
+```python
+pred_xgb = xgb.predict(X_test)
+```
+
+---
+
+# 12. Now comes evaluation
+
+This function:
+
+```python
+evaluate(...)
+```
+
+calculates three metrics.
+
+---
+
+## MAE
+
+Mean Absolute Error.
+
+Suppose:
+
+| Actual | Predicted |
+| -----: | --------: |
+|     90 |        86 |
+|     80 |        84 |
+|     70 |        72 |
+
+Errors:
+
+```text
+4
+4
+2
+```
+
+Average:
+
+[
+MAE = \frac{4+4+2}{3}=3.33
+]
+
+So:
+
+> The model is off by about **3.33 percentage points on average**.
+
+**Lower MAE = better.**
+
+---
+
+# 13. RMSE
+
+RMSE penalizes large mistakes more heavily.
+
+For example:
+
+```text
+Actual = 90
+Prediction = 60
+```
+
+is a much bigger problem than:
+
+```text
+Actual = 90
+Prediction = 87
+```
+
+So RMSE is useful for detecting big prediction errors.
+
+**Lower RMSE = better.**
+
+---
+
+# 14. R²
+
+R² tells you roughly:
+
+> How much of the variation in the target is explained by the model.
+
+For example:
+
+```text
+R² = 0.90
+```
+
+means the model explains about 90% of the variation in the target under this evaluation setup.
+
+**Higher R² = better.**
+
+---
+
+# 15. Example model comparison
+
+Your program might produce something like:
+
+| Model             | MAE | RMSE |   R² |
+| ----------------- | --: | ---: | ---: |
+| Linear Regression | 6.2 |  8.1 | 0.78 |
+| Random Forest     | 3.8 |  5.2 | 0.91 |
+| XGBoost           | 3.4 |  4.7 | 0.93 |
+
+Then:
+
+```text
+XGBoost
+   ↓
+lowest MAE
+lowest RMSE
+highest R²
+   ↓
+Best model
+```
+
+**The actual numbers will come from running your code; these are just examples.**
+
+---
+
+# 16. What is `error_by_days_left_bucket()`?
+
+This is a particularly nice part of your project.
+
+You don't just ask:
+
+> "How accurate is the model?"
+
+You also ask:
+
+> **"How accurate is the model at different points before departure?"**
+
+You create buckets:
+
+```text
+0–3 days
+4–7 days
+8–15 days
+16–30 days
+30+ days
+```
+
+For example:
+
+| Days left |  MAE |
+| --------- | ---: |
+| 30+       | 10.2 |
+| 16–30     |  7.4 |
+| 8–15      |  5.1 |
+| 4–7       |  3.2 |
+| 0–3       |  1.8 |
+
+That makes intuitive sense.
+
+### Why?
+
+30 days before departure:
+
+```text
+Very little booking history
+       ↓
+More uncertainty
+       ↓
+Larger error
+```
+
+3 days before departure:
+
+```text
+Lots of booking history
+       ↓
+Much clearer demand pattern
+       ↓
+Smaller error
+```
+
+This is a **great business insight**.
+
+---
+
+# 17. Feature importance
+
+After XGBoost is trained:
+
+```python
+xgb.feature_importances_
+```
+
+tells you which features were useful to the model.
+
+For example, you might get:
+
+```text
+current_occupancy_pct       0.31
+route_avg_occupancy_loo     0.24
+booking_velocity_7d         0.15
+days_left                   0.12
+price_ratio                 0.07
+holiday                     0.05
+...
+```
+
+Then you can say in your interview:
+
+> "The model found current occupancy, historical route demand, and recent booking velocity to be the strongest predictive features."
+
+That's much more impressive than simply saying:
+
+> "I used XGBoost."
+
+---
+
+# 18. Save the comparison
+
+```python
+results_df.to_csv(
+    "model_comparison.csv",
+    index=False
+)
+```
+
+You get:
+
+```text
+model_comparison.csv
+```
+
+containing:
+
+```text
+model, MAE, RMSE, R2
+```
+
+This is useful for your report/dashboard.
+
+---
+
+# 19. Save the error-by-time table
+
+```python
+bucket_df.to_csv(
+    "model_error_by_days_left.csv"
+)
+```
+
+This lets you later make a chart like:
+
+```text
+MAE
+ ↑
+10 | ●
+ 8 |   ●
+ 6 |      ●
+ 4 |          ●
+ 2 |              ●
+   +--------------------→
+     30+  16-30  8-15  4-7  0-3
+             Days left
+```
+
+---
+
+# 20. Save the models
+
+Finally:
+
+```python
+with open("model_xgboost.pkl", "wb") as f:
+    pickle.dump(xgb, f)
+```
+
+This is extremely important.
+
+You don't want to retrain the model every time a user asks for a prediction.
+
+You train once:
+
+```text
+Gold data
+   ↓
+Train XGBoost
+   ↓
+model_xgboost.pkl
+```
+
+Then later:
+
+```text
+User enters trip details
+        ↓
+Feature engineering
+        ↓
+Load model_xgboost.pkl
+        ↓
+Prediction
+```
+
+---
+
+# 21. So this entire code does ONE major job
+
+Remember this:
+
+```text id="6e6j5j"
+             GOLD DATA
+                 ↓
+       Split by TRIP ID
+                 ↓
+        ┌────────┼────────┐
+        ↓        ↓        ↓
+      Linear   Random   XGBoost
+      Reg.     Forest
+        ↓        ↓        ↓
+       Predictions
+        ↓        ↓        ↓
+       MAE / RMSE / R²
+        ↓        ↓        ↓
+        └────────┼────────┘
+                 ↓
+          Compare Models
+                 ↓
+          Find Best Model
+                 ↓
+       Feature Importance
+                 ↓
+         Save Models (.pkl)
+```
+
+### Your project status now
+
+```text
+✅ Synthetic data generation
+✅ Bronze
+✅ Silver cleaning
+✅ Gold feature engineering
+✅ ML training code       ← YOU ARE HERE
+⬜ Model evaluation/interpretation
+⬜ Final model selection
+⬜ Prediction API
+⬜ Backend
+⬜ Frontend dashboard
+⬜ Deployment
+```
+
+**The next logical step after this code is to run it and inspect the actual `model_comparison.csv`, `model_error_by_days_left.csv`, and `xgboost_feature_importance.csv` results.** Then we can decide whether XGBoost is genuinely the best model before building the prediction API.

@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background-color: #EDEFF3;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(18, 24, 43, 0.04) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+
+.perforation-h {
+  position: relative;
+  background-image: radial-gradient(circle, #EDEFF3 3px, transparent 3.5px);
+  background-size: 18px 100%;
+  background-repeat: repeat-x;
+  background-position: center;
+  height: 2px;
+}
+.perforation-h::before,
+.perforation-h::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #EDEFF3;
+  transform: translateY(-50%);
+}
+.perforation-h::before { left: -8px; }
+.perforation-h::after { right: -8px; }
+
+.perforation-v {
+  position: relative;
+  background-image: radial-gradient(circle, #EDEFF3 3px, transparent 3.5px);
+  background-size: 100% 18px;
+  background-repeat: repeat-y;
+  background-position: center;
+  width: 2px;
+}
+.perforation-v::before,
+.perforation-v::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #EDEFF3;
+  transform: translateX(-50%);
+}
+.perforation-v::before { top: -8px; }
+.perforation-v::after { bottom: -8px; }
+
+@keyframes board-flicker {
+  0% { opacity: 0.2; transform: translateY(2px); }
+  60% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.board-flicker {
+  animation: board-flicker 0.35s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-flicker { animation: none; }
+}
+
+:focus-visible {
+  outline: 2px solid #F2A93B;
+  outline-offset: 2px;
+}

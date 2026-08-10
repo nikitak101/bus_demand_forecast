@@ -1,0 +1,502 @@
+After **Gold feature engineering**, the next steps are basically the **ML → evaluation → prediction → dashboard** part.
+
+### Complete project flow from where you are now
+
+```text
+1. Reference Data
+        ↓
+2. Synthetic Data Generation
+        ↓
+3. Bronze
+        ↓
+4. Data Cleaning / Validation
+        ↓
+5. Silver
+        ↓
+6. Feature Engineering
+        ↓
+7. Gold / ML-ready dataset
+        ↓
+8. Train ML Models
+        ↓
+9. Evaluate Models
+        ↓
+10. Select Best Model
+        ↓
+11. Build Prediction Pipeline
+        ↓
+12. Backend API
+        ↓
+13. Frontend Dashboard
+        ↓
+14. Deploy
+```
+
+You have essentially completed **steps 1–7**.
+
+---
+
+## Step 8 — Train ML models
+
+Now take:
+
+```text
+bus_features_gold.csv
+```
+
+Separate:
+
+### Features `X`
+
+```text
+days_left
+current_occupancy_pct
+booking_velocity_3d
+booking_velocity_7d
+capacity
+price_ratio
+distance_km
+popularity_tier
+holiday
+bus_type
+weekday
+route_avg_occupancy_loo
+...
+```
+
+### Target `y`
+
+```text
+final_occupancy_pct
+```
+
+So:
+
+```text
+X = current situation
+        ↓
+     ML model
+        ↓
+y = final occupancy
+```
+
+For example:
+
+```text
+10 days left
+55% currently booked
+velocity = 2 seats/day
+price = 10% above normal
+holiday = yes
+route popularity = high
+        ↓
+      MODEL
+        ↓
+Predicted final occupancy = 91%
+```
+
+---
+
+# Step 9 — Train multiple models
+
+Don't immediately choose one model.
+
+Try something like:
+
+### Baseline
+
+**Linear Regression**
+
+Good for understanding whether simple relationships work.
+
+### Main models
+
+**Random Forest Regressor**
+
+**XGBoost Regressor**
+
+You can compare them.
+
+```text
+Linear Regression
+       ↓
+Random Forest
+       ↓
+XGBoost
+       ↓
+Compare performance
+```
+
+---
+
+# Step 10 — Evaluate the models
+
+Since your target is a percentage, this is a **regression problem**.
+
+Use:
+
+### MAE
+
+Mean Absolute Error.
+
+If:
+
+```text
+Actual = 90%
+Predicted = 86%
+```
+
+error:
+
+```text
+4 percentage points
+```
+
+If your MAE is:
+
+```text
+4.2
+```
+
+you can explain:
+
+> "On average, the model's prediction differs from actual final occupancy by about 4.2 percentage points."
+
+Also use:
+
+* RMSE
+* R²
+
+For your project, **MAE is particularly easy to explain to an interviewer.**
+
+---
+
+# Step 11 — Very important: split the data correctly
+
+Don't randomly split snapshot rows without thinking.
+
+Remember:
+
+```text
+T001 at 20 days
+T001 at 15 days
+T001 at 10 days
+T001 at 5 days
+```
+
+are all from the **same trip**.
+
+You don't want:
+
+```text
+Training:
+T001 at 20 days
+
+Testing:
+T001 at 10 days
+```
+
+because the model has already seen information from the same trip.
+
+Instead, split by **trip_id**.
+
+For example:
+
+```text
+70% trips → training
+15% trips → validation
+15% trips → testing
+```
+
+This is very important for avoiding leakage.
+
+---
+
+# Step 12 — Feature importance
+
+Now answer:
+
+> **Which factors actually affect bus demand?**
+
+For Random Forest/XGBoost you can look at feature importance.
+
+You might get something like:
+
+```text
+current_occupancy_pct      31%
+route_avg_occupancy_loo    24%
+booking_velocity_7d        15%
+days_left                  12%
+price_ratio                 7%
+holiday                     5%
+capacity                    3%
+bus_type                    2%
+weekday                     1%
+```
+
+Then your dashboard can say:
+
+> **Current occupancy and historical route demand are the strongest predictors of final occupancy.**
+
+This makes the project much more interesting than just "I trained XGBoost."
+
+---
+
+# Step 13 — Build the actual prediction pipeline
+
+Now suppose a user enters:
+
+```text
+Route: Mumbai → Pune
+Bus: AC Sleeper
+Capacity: 40
+Price: ₹700
+Departure: 30 Aug
+Current date: 20 Aug
+Current seats booked: 24
+```
+
+Your backend calculates:
+
+```text
+days_left = 10
+current_occupancy = 60%
+seats_remaining = 16
+booking_velocity = ...
+price_ratio = ...
+holiday = ...
+route popularity = ...
+```
+
+Then:
+
+```text
+             INPUT
+               ↓
+        Feature Engineering
+               ↓
+        Trained ML Model
+               ↓
+      Predicted final occupancy
+               ↓
+               91%
+```
+
+---
+
+# Step 14 — You can make the prediction more useful
+
+Your original idea was:
+
+> "How much percentage of my bus should I expect to be booked before X days?"
+
+So don't only predict the final occupancy.
+
+Your system can produce:
+
+| Days before departure | Predicted occupancy |
+| --------------------: | ------------------: |
+|                    15 |                 45% |
+|                    10 |                 61% |
+|                     7 |                 72% |
+|                     5 |                 80% |
+|                     3 |                 87% |
+|                     1 |                 92% |
+|             Departure |                 94% |
+
+Then your dashboard can display a **booking forecast curve**.
+
+![Image](https://images.openai.com/static-rsc-4/9ha4mhtPThCtBFry51O8KPztMDLCK2fl5LXRg1EJ_7yIBP6TfdaR9FQFDs7hdVscA657nT1tUlTu5U5mWHu2T0tTMhq8Yk5mnRQWx5kixIVLb-kpECYrt-Ul2cvlStSbfgQxWDyO_oBV7_t8mpMnLDzcMHxlAaLKXbWealkeueu75YQn7c-sNPMhuJ8Md-FY?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/1suhwTcMktd3EGCFL21GyE-ZQGpI5TS1VXvts5lcI0wfyAra0bW8bzuBP0CVf4yhwy6_IoEXkQwvcJv-i2EY8L-Qi2gNOI1oCgzE2UHgG5NkKpFTlu7izrOsCz0gzyE38v50IKFPXkMqaNRE-rlVfPa0XCZGcyFq5OgOcB1cVdsJBdQ4ylJsRPg4egIWyYtx?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/8y2uMbiFROhJal3osCcELo-aDmB3Iw7nNztJZ_vx-ITQkTSXMvqdVq7sQjdCo35fdMQuaR1u04QeCjZSpe08H_uyqDIY6ZUEMg_Qclx4FZUkF5eVueg0pbvGOdZWcWkqvMsfQ573t2VtSOuDuHAydcD_sUOMN-DRYUNHj-d_PM9wUiKNWWhg5WFkNJP62u26?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/KES8tNZhMTR8944W-IWgnDk7e-p9maph2L4NPQRcyVdp6ecY4uT-spPjUYtVUXRwoBZq-ynigVa5gPR3Riwpt_2ml5--JalC8LsWr2bcQXpdauOKgjCSAArXfDqDGBNUotyXsQ8FQfcKGFWPWiewK97CpzL8CgvibaxVP212z6AwDlSpTCpY4V4iWMu6orBY?purpose=fullsize)
+
+---
+
+# Step 15 — Backend
+
+You can use something like:
+
+```text
+Frontend
+React
+   ↓
+Backend API
+FastAPI
+   ↓
+ML Model
+XGBoost / Random Forest
+   ↓
+Gold dataset / model artifacts
+```
+
+Example endpoint conceptually:
+
+```text
+POST /predict
+```
+
+Input:
+
+```json
+{
+  "route": "Mumbai-Pune",
+  "bus_type": "AC Sleeper",
+  "capacity": 40,
+  "price": 700,
+  "departure_date": "2026-08-30",
+  "current_seats_booked": 24
+}
+```
+
+Output:
+
+```json
+{
+  "current_occupancy": 60,
+  "predicted_final_occupancy": 91,
+  "predicted_final_seats": 36
+}
+```
+
+---
+
+# Step 16 — Frontend dashboard
+
+The user enters the trip details:
+
+```text
+┌─────────────────────────────────┐
+│       BUS DEMAND FORECAST       │
+├─────────────────────────────────┤
+│ Route       [ Mumbai → Pune ]   │
+│ Bus Type    [ AC Sleeper ]      │
+│ Capacity    [ 40 ]              │
+│ Price       [ ₹700 ]            │
+│ Departure   [ 30 Aug ]          │
+│ Seats Booked[ 24 ]              │
+│                                 │
+│        [ PREDICT ]              │
+└─────────────────────────────────┘
+```
+
+Then show:
+
+```text
+Current Occupancy
+       60%
+
+Predicted Final Occupancy
+       91%
+
+Expected Final Seats
+       36 / 40
+```
+
+And:
+
+```text
+Booking Forecast
+
+100% |                         ●
+ 90% |                    ●────
+ 80% |                ●
+ 70% |            ●
+ 60% |        ●
+ 50% |     ●
+     +---------------------------
+       15   10    7    5    3   1
+              Days Left
+```
+
+---
+
+# Step 17 — Add analytics
+
+This is where your **Data Analytics** part becomes visible.
+
+Dashboard could show:
+
+### Demand by route
+
+```text
+Mumbai-Pune       89%
+Mumbai-Nashik     76%
+Pune-Nashik       71%
+```
+
+### Demand by bus type
+
+```text
+AC Sleeper        84%
+Volvo             88%
+AC Seater         72%
+Non-AC            61%
+```
+
+### Holiday vs normal
+
+```text
+Holiday           86%
+Normal            65%
+```
+
+### Price effect
+
+Show how occupancy changes as price increases.
+
+---
+
+# Step 18 — Final architecture
+
+Your project becomes:
+
+```text
+                 REFERENCE DATA
+                       ↓
+               DATA GENERATOR
+                       ↓
+                    BRONZE
+                       ↓
+              DATA VALIDATION
+                       ↓
+                    SILVER
+                       ↓
+             FEATURE ENGINEERING
+                       ↓
+                     GOLD
+                       ↓
+              ┌────────────────┐
+              │  ML TRAINING   │
+              └───────┬────────┘
+                      ↓
+              MODEL EVALUATION
+                      ↓
+              BEST MODEL SAVED
+                      ↓
+                  FASTAPI
+                      ↓
+                  REACT UI
+                      ↓
+              ┌────────────────┐
+              │   DASHBOARD    │
+              │                │
+              │ Current: 60%   │
+              │ Predicted: 91% │
+              │ Forecast curve │
+              │ Route analytics│
+              └────────────────┘
+```
+
+### So your immediate next step is:
+
+**Don't build the frontend yet.**
+
+First do:
+
+**Gold dataset → Train/validation/test split by `trip_id` → Linear Regression + Random Forest + XGBoost → MAE/RMSE/R² → choose best model.**
+
+After that, we build the **prediction pipeline**, and only then connect it to FastAPI + React.

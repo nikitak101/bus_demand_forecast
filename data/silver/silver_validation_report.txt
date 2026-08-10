@@ -1,0 +1,13 @@
+=== Bronze -> Silver transformation ===
+
+Loaded Bronze: 4000 trips, 120803 daily booking rows
+1. Data type coercion: 0 rows had unparseable date/seats_booked/trip_id
+2. Removed invalid records (negative seats_booked / days_to_departure): 0 rows
+3. Duplicate (trip_id, date) rows found and dropped: 0
+4. Rows where seats_booked > capacity: 0 (clipped to capacity)
+5. Orphan rows (trip_id not in master trips table): 0 dropped
+6. Rows where Bronze occupancy_pct disagreed with recalculated value (>0.5pt): 0
+
+Bronze rows: 120803 -> Silver rows: 120803 (0 rows removed total, 0.00% of Bronze)
+
+All Silver-layer assertions passed: bookings<=capacity, valid trip_ids, no duplicates.

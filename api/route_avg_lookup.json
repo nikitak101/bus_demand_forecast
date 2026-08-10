@@ -1,0 +1,30 @@
+{
+  "routes": {
+    "Ahmedabad -> Mumbai": 67.69,
+    "Ahmedabad -> Surat": 79.45,
+    "Bangalore -> Chennai": 78.28,
+    "Bangalore -> Coimbatore": 66.34,
+    "Bangalore -> Goa": 50.74,
+    "Bangalore -> Hyderabad": 67.41,
+    "Bangalore -> Mysore": 77.58,
+    "Chennai -> Coimbatore": 64.41,
+    "Chennai -> Madurai": 66.79,
+    "Delhi -> Agra": 68.23,
+    "Delhi -> Chandigarh": 65.16,
+    "Delhi -> Dehradun": 65.13,
+    "Delhi -> Jaipur": 78.91,
+    "Hyderabad -> Bangalore": 68.33,
+    "Hyderabad -> Vijayawada": 64.33,
+    "Jaipur -> Udaipur": 50.34,
+    "Kochi -> Bangalore": 48.92,
+    "Kolkata -> Digha": 49.82,
+    "Mumbai -> Goa": 67.36,
+    "Mumbai -> Nashik": 66.1,
+    "Mumbai -> Pune": 79.18,
+    "Mumbai -> Shirdi": 66.56,
+    "Pune -> Kolhapur": 66.75,
+    "Pune -> Nashik": 49.06,
+    "Surat -> Mumbai": 65.5
+  },
+  "global_mean": 65.42
+}

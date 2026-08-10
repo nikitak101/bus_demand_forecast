@@ -1,0 +1,4 @@
+daily_df is your Step 5 output.
+But the cleaning/Silver stage hasn't happened yet in the architecture we discussed.
+our current generator is producing the synthetic source/daily dataset.
+After this, you'd run data-quality checks + transformations, then produce your Silver/Gold datasets for ML.

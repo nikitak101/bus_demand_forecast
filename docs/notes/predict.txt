@@ -1,0 +1,843 @@
+Yes. This **Step 10b is the actual production prediction step**. The previous Step 10a created the final XGBoost model; this file takes a **new bus trip + its current booking information** and uses that model to predict how full the bus will be at departure. The uploaded file describes this as a pure “new trip in → feature row → prediction out” process. 
+
+## 1. Where this fits in your complete project
+
+Your entire pipeline is now:
+
+```text
+REFERENCE DATA
+     ↓
+STEP 5: Generate synthetic raw data
+     ↓
+BRONZE
+bus_trips_master.csv
+bus_booking_daily.csv
+     ↓
+STEP 7: Clean + validate
+     ↓
+SILVER
+bus_booking_silver.csv
+     ↓
+STEP 8: Feature Engineering
+     ↓
+GOLD
+bus_features_gold.csv
+     ↓
+STEP 9: Compare models
+Linear Regression
+Random Forest
+XGBoost
+     ↓
+XGBoost wins
+     ↓
+STEP 10a: Retrain XGBoost on 100% Gold data
+     ↓
+model_xgboost_final.pkl
+     ↓
+STEP 10b: Prediction
+     ↓
+NEW BUS TRIP
+     ↓
+Build Gold-style features
+     ↓
+XGBoost
+     ↓
+Predicted final occupancy
+     ↓
+Demand tier
+     ↓
+Business recommendation
+```
+
+The uploaded code specifically implements the final part. 
+
+---
+
+# 2. What is the purpose of `predict.py`?
+
+Imagine a bus company asks:
+
+> "I have a Mumbai → Pune AC Sleeper bus. It has 32 seats. It's 10 days before departure and 18 seats are already booked. How full will this bus probably be when it leaves?"
+
+You give the system:
+
+```python
+{
+    "origin": "Mumbai",
+    "destination": "Pune",
+    "bus_type": "AC Sleeper",
+    "capacity": 32,
+    "base_price_inr": 800,
+    "departure_date": "2026-08-30",
+    "booking_open_date": "2026-08-10",
+    "as_of_date": "2026-08-20",
+    "current_seats_booked": 18
+}
+```
+
+The system converts this information into the **same features that XGBoost saw during training**.
+
+Then:
+
+```text
+Input
+ ↓
+Feature Engineering
+ ↓
+XGBoost
+ ↓
+85.13% predicted final occupancy
+ ↓
+27 seats predicted
+ ↓
+HIGH demand
+ ↓
+Add another bus/frequency
+```
+
+---
+
+# 3. First important thing: it does NOT retrain
+
+This is extremely important.
+
+`predict.py` does **not** do:
+
+```text
+new data
+   ↓
+train XGBoost
+```
+
+Instead:
+
+```text
+already trained model
+        ↓
+new trip
+        ↓
+prediction
+```
+
+The code explicitly says it does not retrain or modify Bronze/Silver/training data. 
+
+So:
+
+### `finalize_model.py`
+
+```text
+Gold data
+   ↓
+Train XGBoost
+   ↓
+model_xgboost_final.pkl
+```
+
+### `predict.py`
+
+```text
+New trip
+   ↓
+Load model_xgboost_final.pkl
+   ↓
+Predict
+```
+
+---
+
+# 4. Step 1 — Load the trained model
+
+This part:
+
+```python
+def _load_artifacts():
+    with open(MODEL_PATH, "rb") as f:
+        model = pickle.load(f)
+
+    with open(FEATURE_COLUMNS_PATH) as f:
+        feature_cols = json.load(f)
+
+    with open(ROUTE_LOOKUP_PATH) as f:
+        route_lookup = json.load(f)
+
+    return model, feature_cols, route_lookup
+```
+
+loads **three things**:
+
+| File                      | Purpose                                |
+| ------------------------- | -------------------------------------- |
+| `model_xgboost_final.pkl` | Trained XGBoost model                  |
+| `feature_columns.json`    | Exact features/order expected by model |
+| `route_avg_lookup.json`   | Historical route occupancy averages    |
+
+So think:
+
+```text
+model_xgboost_final.pkl
+        ↓
+"How should I predict?"
+
+feature_columns.json
+        ↓
+"What features/order should I give you?"
+
+route_avg_lookup.json
+        ↓
+"What is the historical demand of this route?"
+```
+
+The uploaded code loads exactly these three artifacts. 
+
+---
+
+# 5. Step 2 — User provides new trip information
+
+For example:
+
+```python
+origin = "Mumbai"
+destination = "Pune"
+bus_type = "AC Sleeper"
+capacity = 32
+price = 800
+departure = "2026-08-30"
+booking_open = "2026-08-10"
+today = "2026-08-20"
+current_bookings = 18
+```
+
+So currently:
+
+```text
+Capacity = 32
+Booked = 18
+
+Current occupancy =
+18 / 32 × 100
+= 56.25%
+```
+
+But the business doesn't want to know only **current occupancy**.
+
+They want:
+
+> "How many seats will probably be occupied at departure?"
+
+That's the prediction target:
+
+```text
+final_occupancy_pct
+```
+
+---
+
+# 6. Step 3 — Calculate time features
+
+From the dates, the code calculates:
+
+```python
+booking_window_days = departure_date - booking_open_date
+```
+
+Here:
+
+```text
+Aug 30 - Aug 10
+= 20 days
+```
+
+Then:
+
+```python
+days_since_open = as_of_date - booking_open_date
+```
+
+```text
+Aug 20 - Aug 10
+= 10 days
+```
+
+And:
+
+```python
+days_left = departure_date - as_of_date
+```
+
+```text
+Aug 30 - Aug 20
+= 10 days
+```
+
+So:
+
+| Feature             |       Value |
+| ------------------- | ----------: |
+| booking_window_days |          20 |
+| days_since_open     |          10 |
+| days_left           |          10 |
+| days_left_ratio     | 10/20 = 0.5 |
+
+These are important because **the same 18 bookings mean something different 1 day before departure vs 30 days before departure.**
+
+---
+
+# 7. Step 4 — Calculate current occupancy
+
+The code:
+
+```python
+current_occupancy_pct = 100 * current_seats_booked / capacity
+```
+
+For our example:
+
+```text
+18 / 32 × 100
+= 56.25%
+```
+
+It also calculates:
+
+```python
+seats_remaining = capacity - current_seats_booked
+```
+
+So:
+
+```text
+32 - 18 = 14 seats remaining
+```
+
+Therefore:
+
+```text
+Current occupancy = 56.25%
+Seats remaining = 14
+```
+
+---
+
+# 8. Step 5 — Calculate booking velocity
+
+This is one of the most important features.
+
+Suppose the user doesn't provide previous booking history.
+
+The code estimates:
+
+```python
+avg_daily_rate =
+current_seats_booked / days_since_open
+```
+
+Here:
+
+```text
+18 / 10
+= 1.8 seats/day
+```
+
+Then it estimates:
+
+```text
+1 day ago:
+18 - 1.8 = 16.2
+
+3 days ago:
+18 - (1.8 × 3)
+= 12.6
+
+7 days ago:
+18 - (1.8 × 7)
+= 5.4
+```
+
+Then:
+
+```python
+booking_velocity_3d =
+(current - seats_3d_ago) / 3
+```
+
+Approximately:
+
+```text
+(18 - 12.6) / 3
+= 1.8 seats/day
+```
+
+And:
+
+```python
+booking_velocity_7d =
+(current - seats_7d_ago) / 7
+```
+
+Approximately:
+
+```text
+(18 - 5.4) / 7
+= 1.8 seats/day
+```
+
+So the model learns:
+
+> "This bus is currently gaining approximately 1.8 bookings/day."
+
+The file distinguishes between **real history provided by the caller** and **estimated history**. 
+
+---
+
+# 9. What if we actually know the booking history?
+
+This is better.
+
+Instead of:
+
+```python
+current_seats_booked=18
+```
+
+only, you could provide:
+
+```python
+recent_seats_booked={
+    "-1": 17,
+    "-3": 14,
+    "-7": 8
+}
+```
+
+Meaning:
+
+```text
+Today       = 18
+1 day ago   = 17
+3 days ago  = 14
+7 days ago  = 8
+```
+
+Then:
+
+```text
+3-day velocity
+= (18 - 14) / 3
+= 1.33 seats/day
+```
+
+and:
+
+```text
+7-day velocity
+= (18 - 8) / 7
+= 1.43 seats/day
+```
+
+This is **better than estimation** because you're giving the model actual booking behavior.
+
+---
+
+# 10. Step 6 — Calculate price effect
+
+The model also needs:
+
+```text
+price_ratio
+```
+
+For example:
+
+```text
+Current ticket = ₹800
+Typical route price = ₹750
+
+price_ratio = 800 / 750
+             = 1.067
+```
+
+Meaning:
+
+```text
+Ticket is about 6.7% more expensive than typical.
+```
+
+The code calculates the route's typical price using the reference bus/fare information. 
+
+---
+
+# 11. Step 7 — Determine route popularity
+
+The model needs to know whether:
+
+```text
+Mumbai → Pune
+```
+
+is historically a high-demand route.
+
+It looks up:
+
+```python
+route_avg_occupancy
+```
+
+from:
+
+```text
+route_avg_lookup.json
+```
+
+For example:
+
+```text
+Mumbai → Pune = 82%
+```
+
+So the model gets:
+
+```text
+route_avg_occupancy = 82%
+```
+
+This tells XGBoost:
+
+> "Historically, this route tends to have high occupancy."
+
+---
+
+# 12. What happens with an unknown route?
+
+Suppose user enters:
+
+```text
+Mumbai → Nagpur
+```
+
+but that route wasn't present in the reference data.
+
+The code doesn't crash immediately.
+
+It does:
+
+```text
+popularity tier = 2
+```
+
+and uses a fallback distance.
+
+It also uses the global average occupancy if there is no historical route average.  
+
+And importantly:
+
+```text
+WARNING:
+No historical data for route...
+using global average occupancy
+```
+
+So the system is telling you:
+
+> "I can still predict, but this prediction is less reliable because I don't know this route historically."
+
+That's good production behavior.
+
+---
+
+# 13. Step 8 — Holiday and weekday features
+
+The model also calculates:
+
+```text
+is_holiday_period
+```
+
+For example:
+
+```text
+Holiday = Yes
+```
+
+Then:
+
+```python
+is_holiday = 1
+```
+
+It also determines:
+
+```text
+departure_weekday = Sunday
+```
+
+Then creates one-hot features:
+
+```text
+wd_Monday
+wd_Tuesday
+wd_Wednesday
+...
+wd_Sunday
+```
+
+For Sunday:
+
+```text
+wd_Monday    = 0
+wd_Tuesday   = 0
+...
+wd_Saturday  = 0
+wd_Sunday    = 1
+```
+
+The same idea is used for bus type.
+
+For AC Sleeper:
+
+```text
+bus_AC_Sleeper = 1
+```
+
+and other bus types:
+
+```text
+0
+```
+
+---
+
+# 14. Now we have the Gold-style feature row
+
+After all calculations, the new trip becomes something like:
+
+| Feature               |            Example |
+| --------------------- | -----------------: |
+| days_left             |                 10 |
+| current_seats_booked  |                 18 |
+| capacity              |                 32 |
+| current_occupancy_pct |              56.25 |
+| booking_window_days   |                 20 |
+| occupancy_lag1        |               50.6 |
+| occupancy_lag3        |               39.4 |
+| occupancy_lag7        |               16.9 |
+| booking_velocity_3d   |                1.8 |
+| booking_velocity_7d   |                1.8 |
+| seats_remaining       |                 14 |
+| days_since_open       |                 10 |
+| days_left_ratio       |                0.5 |
+| distance_km           |    route-dependent |
+| popularity_tier       |    route-dependent |
+| base_price_inr        |                800 |
+| price_ratio           |    route-dependent |
+| is_holiday_period     |                0/1 |
+| route_avg_occupancy   |   historical value |
+| bus_AC_Sleeper        |                  1 |
+| other bus types       |                  0 |
+| weekday one-hot       | based on departure |
+
+This is essentially creating **one new row that looks like a Gold dataset row**.
+
+---
+
+# 15. Step 9 — Exact feature order
+
+This part is VERY important:
+
+```python
+ordered = {c: row[c] for c in feature_cols}
+```
+
+Why?
+
+Suppose during training XGBoost saw:
+
+```text
+Feature 1 = days_left
+Feature 2 = capacity
+Feature 3 = price
+Feature 4 = occupancy
+```
+
+But during prediction you accidentally send:
+
+```text
+Feature 1 = price
+Feature 2 = occupancy
+Feature 3 = days_left
+Feature 4 = capacity
+```
+
+The numbers are present, but the model interprets them incorrectly.
+
+So:
+
+```text
+Training:
+[A, B, C, D]
+
+Prediction must be:
+[A, B, C, D]
+```
+
+NOT:
+
+```text
+[B, D, A, C]
+```
+
+That's why `feature_columns.json` exists.
+
+The source explicitly describes exact feature formulas **and exact column order** as critical to avoiding training/serving skew. 
+
+---
+
+# 16. Step 10 — XGBoost predicts
+
+Now we finally reach:
+
+```python
+predicted_pct = model.predict(X)[0]
+```
+
+Suppose XGBoost gives:
+
+```text
+85.13
+```
+
+That means:
+
+```text
+Predicted final occupancy = 85.13%
+```
+
+For a 32-seat bus:
+
+```text
+32 × 85.13 / 100
+= 27.24
+```
+
+Rounded:
+
+```text
+27 seats
+```
+
+The code calculates this directly. 
+
+---
+
+# 17. Step 11 — Convert prediction into business meaning
+
+The model itself only predicts:
+
+```text
+85.13%
+```
+
+But a business user doesn't necessarily know what to do with that.
+
+So the code adds a **business layer**:
+
+```python
+if predicted_pct >= 80:
+    HIGH
+
+elif predicted_pct >= 50:
+    MEDIUM
+
+else:
+    LOW
+```
+
+Therefore:
+
+```text
+85.13%
+    ↓
+HIGH
+```
+
+Then:
+
+```text
+HIGH
+↓
+Consider adding frequency
+```
+
+The thresholds and recommendations are explicitly defined in the uploaded code. 
+
+---
+
+# 18. Final output
+
+So the final output could look like:
+
+```text
+Predicted final occupancy = 85.13%
+Predicted final seats     = 27
+Capacity                  = 32
+Demand tier               = HIGH
+Recommendation             = Consider adding frequency...
+Days left                  = 10
+Popularity tier            = 1
+Route known                = True
+Lag source                 = estimated
+Warnings                   = [...]
+```
+
+The returned dictionary contains these business-facing outputs and metadata. 
+
+---
+
+# 19. The most important distinction
+
+You should remember these three stages:
+
+### Stage A — Training
+
+```text
+Historical Gold data
+       ↓
+XGBoost learns relationships
+       ↓
+model_xgboost_final.pkl
+```
+
+### Stage B — Feature engineering for NEW trip
+
+```text
+New trip information
+       ↓
+Calculate the SAME features
+       ↓
+Gold-style feature row
+```
+
+### Stage C — Prediction
+
+```text
+Gold-style feature row
+       ↓
+XGBoost
+       ↓
+Final occupancy %
+       ↓
+Demand tier
+       ↓
+Business recommendation
+```
+
+So **`predict.py` is basically your inference/serving layer**.
+
+---
+
+## One-line interview explanation
+
+If an interviewer asks **"What does your prediction pipeline do?"**, say:
+
+> **"Once XGBoost was finalized, my prediction pipeline accepts a new trip's static details and current booking status, reconstructs the same Gold-layer features used during training—including booking velocity, occupancy, price ratio, route popularity, holiday and bus-type features—and passes them to the saved XGBoost model. It then converts the predicted final occupancy into predicted seats, a demand tier, and a business recommendation, while explicitly handling unknown routes and missing booking-history features."**
+
+That is the core idea of your Step 10b.

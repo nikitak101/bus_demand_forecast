@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Secrets
+.env
+frontend/.env
+api/.env
+
+# OS junk
+.DS_Store
+Thumbs.db

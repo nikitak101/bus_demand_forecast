@@ -1,0 +1,1110 @@
+Yes. **Step 11 is the FastAPI backend layer.** The important idea is:
+
+> **This file does not build the ML features or train the model. It exposes your already-built `predict.py` as an HTTP API that a React frontend can call.**
+
+Your overall pipeline is now:
+
+```text
+Bronze
+   ↓
+Silver
+   ↓
+Gold / Feature Engineering
+   ↓
+Step 9: Compare Models
+   ↓
+Step 10a: Final XGBoost Model
+   ↓
+Step 10b: predict.py
+   ↓
+Step 11: FastAPI Backend  ← YOU ARE HERE
+   ↓
+Step 12: React Frontend
+```
+
+---
+
+# 1. What is FastAPI doing here?
+
+Suppose your React frontend has a form:
+
+```text
+Origin:             Mumbai
+Destination:        Pune
+Bus Type:           AC Sleeper
+Capacity:           32
+Price:              ₹800
+Departure Date:     30 Aug 2026
+Booking Open:       10 Aug 2026
+Current Bookings:   18
+```
+
+React cannot directly do:
+
+```python
+model_xgboost_final.pkl
+```
+
+Instead, React sends an HTTP request:
+
+```text
+React
+   |
+   | POST /predict
+   ↓
+FastAPI
+   |
+   ↓
+predict.py
+   |
+   ↓
+XGBoost model
+   |
+   ↓
+Prediction
+   |
+   ↓
+FastAPI
+   |
+   ↓
+React
+```
+
+So FastAPI is basically the **bridge between your frontend and ML model**.
+
+---
+
+# 2. These imports
+
+```python
+from datetime import date
+from typing import Optional, Dict
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator
+
+from predict import predict as run_prediction
+from reference_data import ROUTES, BUS_TYPES
+```
+
+### `FastAPI`
+
+```python
+from fastapi import FastAPI
+```
+
+Used to create your API application.
+
+```python
+app = FastAPI(...)
+```
+
+---
+
+### `HTTPException`
+
+```python
+from fastapi import HTTPException
+```
+
+Used when something goes wrong.
+
+For example:
+
+```text
+User sends invalid bus type
+        ↓
+400 Bad Request
+```
+
+---
+
+### Pydantic
+
+```python
+from pydantic import BaseModel, Field
+```
+
+Pydantic validates the data coming from the frontend.
+
+For example:
+
+```python
+capacity: int = Field(..., gt=0, le=80)
+```
+
+means:
+
+```text
+capacity must be:
+> 0
+<= 80
+```
+
+So:
+
+```json
+{
+    "capacity": 32
+}
+```
+
+✅ valid
+
+But:
+
+```json
+{
+    "capacity": -5
+}
+```
+
+❌ rejected.
+
+---
+
+# 3. Creating the FastAPI application
+
+```python
+app = FastAPI(
+    title="Bus Demand & Booking Forecasting API",
+    description="Predicts final occupancy for a bus trip given its route, "
+                "pricing, and current booking progress.",
+    version="1.0.0",
+)
+```
+
+This creates your API.
+
+The nice thing is FastAPI automatically creates interactive API documentation.
+
+When you run:
+
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+you can open:
+
+```text
+http://localhost:8000/docs
+```
+
+and you'll get a Swagger UI where you can test:
+
+```text
+GET  /health
+GET  /routes
+GET  /bus-types
+POST /predict
+```
+
+---
+
+# 4. CORS
+
+This part:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173"
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+is important because your frontend and backend run on different ports.
+
+For example:
+
+```text
+React
+localhost:3000
+
+FastAPI
+localhost:8000
+```
+
+The browser sees these as different origins.
+
+CORS tells FastAPI:
+
+> "Allow my React application to send requests to this backend."
+
+Later, when you deploy, you should replace these localhost origins with your real frontend URL.
+
+---
+
+# 5. `RecentSeatsBooked`
+
+```python
+class RecentSeatsBooked(BaseModel):
+    minus_1: int = Field(..., alias="-1")
+    minus_3: int = Field(..., alias="-3")
+    minus_7: int = Field(..., alias="-7")
+```
+
+This represents historical booking information.
+
+For example:
+
+```json
+{
+    "-1": 21,
+    "-3": 18,
+    "-7": 12
+}
+```
+
+means:
+
+```text
+1 day ago  → 21 seats
+3 days ago → 18 seats
+7 days ago → 12 seats
+```
+
+Those values help calculate:
+
+```text
+occupancy_lag1
+occupancy_lag3
+occupancy_lag7
+
+booking_velocity_3d
+booking_velocity_7d
+```
+
+### Important
+
+In the code you showed, this class is actually **not used directly** in `TripPredictionRequest`.
+
+Instead, the request has:
+
+```python
+recent_seats_booked: Optional[Dict[str, int]]
+```
+
+So `RecentSeatsBooked` appears to be an unused schema in this version.
+
+---
+
+# 6. Main request schema
+
+This is probably the **most important part of Step 11**:
+
+```python
+class TripPredictionRequest(BaseModel):
+```
+
+It defines exactly what the frontend is allowed to send to:
+
+```text
+POST /predict
+```
+
+For example:
+
+```python
+origin: str
+destination: str
+bus_type: str
+capacity: int
+base_price_inr: float
+departure_date: date
+booking_open_date: date
+as_of_date: Optional[date]
+current_seats_booked: int
+```
+
+So your frontend might send:
+
+```json
+{
+    "origin": "Mumbai",
+    "destination": "Pune",
+    "bus_type": "AC Sleeper",
+    "capacity": 32,
+    "base_price_inr": 800,
+    "departure_date": "2026-08-30",
+    "booking_open_date": "2026-08-10",
+    "as_of_date": "2026-08-20",
+    "current_seats_booked": 18
+}
+```
+
+FastAPI converts this JSON into a Python object:
+
+```python
+req
+```
+
+of type:
+
+```python
+TripPredictionRequest
+```
+
+---
+
+# 7. Field validation
+
+For example:
+
+```python
+capacity: int = Field(..., gt=0, le=80)
+```
+
+means:
+
+```text
+capacity
+   ↓
+must be integer
+   ↓
+must be > 0
+   ↓
+must be <= 80
+```
+
+Similarly:
+
+```python
+base_price_inr: float = Field(..., gt=0)
+```
+
+means price must be positive.
+
+And:
+
+```python
+current_seats_booked: int = Field(..., ge=0)
+```
+
+means:
+
+```text
+current_seats_booked >= 0
+```
+
+---
+
+# 8. Bus type validation
+
+This:
+
+```python
+@field_validator("bus_type")
+@classmethod
+def bus_type_must_be_known(cls, v):
+    if v not in BUS_TYPES:
+        raise ValueError(
+            f"bus_type must be one of {list(BUS_TYPES.keys())}"
+        )
+    return v
+```
+
+checks whether the user entered a valid bus type.
+
+Suppose:
+
+```python
+BUS_TYPES
+```
+
+contains:
+
+```text
+AC Seater
+AC Sleeper
+Non-AC Seater
+Non-AC Sleeper
+Volvo AC Semi-Sleeper
+```
+
+Then:
+
+```json
+"bus_type": "AC Sleeper"
+```
+
+✅ valid.
+
+But:
+
+```json
+"bus_type": "Luxury Rocket Bus"
+```
+
+❌ invalid.
+
+---
+
+# 9. Booking date validation
+
+This:
+
+```python
+@field_validator("booking_open_date")
+@classmethod
+def booking_open_before_departure(cls, v, info):
+    departure = info.data.get("departure_date")
+
+    if departure and v >= departure:
+        raise ValueError(
+            "booking_open_date must be before departure_date"
+        )
+
+    return v
+```
+
+checks this logical rule:
+
+```text
+booking open date < departure date
+```
+
+For example:
+
+```text
+Booking opens: 10 Aug
+Departure:     30 Aug
+
+10 Aug < 30 Aug
+```
+
+✅
+
+But:
+
+```text
+Booking opens: 30 Aug
+Departure:     30 Aug
+```
+
+❌
+
+And:
+
+```text
+Booking opens: 1 Sep
+Departure:     30 Aug
+```
+
+❌
+
+---
+
+# 10. Seats cannot exceed capacity
+
+This validator:
+
+```python
+@field_validator("current_seats_booked")
+@classmethod
+def seats_within_capacity(cls, v, info):
+    capacity = info.data.get("capacity")
+
+    if capacity is not None and v > capacity:
+        raise ValueError(
+            "current_seats_booked cannot exceed capacity"
+        )
+
+    return v
+```
+
+prevents:
+
+```text
+Capacity = 32
+Booked = 40
+```
+
+because:
+
+```text
+40 > 32
+```
+
+❌
+
+This is another layer of data validation.
+
+---
+
+# 11. Response schema
+
+Then you have:
+
+```python
+class TripPredictionResponse(BaseModel):
+```
+
+This defines what the API will return.
+
+For example:
+
+```python
+predicted_final_occupancy_pct: float
+predicted_final_seats: int
+capacity: int
+demand_tier: str
+recommendation: str
+days_left: int
+popularity_tier_used: int
+route_known_in_reference_data: bool
+lag_feature_source: str
+warnings: list[str]
+```
+
+So the final API response could look like:
+
+```json
+{
+    "predicted_final_occupancy_pct": 85.13,
+    "predicted_final_seats": 27,
+    "capacity": 32,
+    "demand_tier": "HIGH",
+    "recommendation": "Consider adding frequency...",
+    "days_left": 10,
+    "popularity_tier_used": 1,
+    "route_known_in_reference_data": true,
+    "lag_feature_source": "estimated",
+    "warnings": []
+}
+```
+
+---
+
+# 12. `/health`
+
+```python
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+```
+
+This is a very simple endpoint.
+
+You visit:
+
+```text
+GET /health
+```
+
+and get:
+
+```json
+{
+    "status": "ok"
+}
+```
+
+It answers:
+
+> "Is my backend running?"
+
+---
+
+# 13. `/routes`
+
+```python
+@app.get("/routes")
+def list_routes():
+```
+
+This returns your available routes.
+
+For example:
+
+```json
+[
+    {
+        "origin": "Mumbai",
+        "destination": "Pune",
+        "distance_km": 150,
+        "popularity_tier": 1
+    },
+    ...
+]
+```
+
+### Why?
+
+Your React frontend can call:
+
+```text
+GET /routes
+```
+
+and populate a dropdown:
+
+```text
+Origin       [ Mumbai ▼ ]
+Destination  [ Pune ▼ ]
+```
+
+Instead of hardcoding routes in React.
+
+---
+
+# 14. `/bus-types`
+
+Similarly:
+
+```python
+@app.get("/bus-types")
+def list_bus_types():
+```
+
+returns bus types.
+
+For example:
+
+```json
+[
+    {
+        "bus_type": "AC Sleeper",
+        "capacity_range": ...,
+        "fare_per_km_range": ...
+    }
+]
+```
+
+React can use this to populate:
+
+```text
+Bus Type
+[ AC Sleeper ▼ ]
+```
+
+---
+
+# 15. The most important endpoint: `/predict`
+
+Here:
+
+```python
+@app.post("/predict", response_model=TripPredictionResponse)
+def predict_occupancy(req: TripPredictionRequest):
+```
+
+This means:
+
+```text
+HTTP method = POST
+
+URL = /predict
+
+Input = TripPredictionRequest
+
+Output = TripPredictionResponse
+```
+
+---
+
+# 16. What happens inside `/predict`?
+
+First:
+
+```python
+trip_input = req.model_dump(
+    exclude_none=True,
+    mode="json"
+)
+```
+
+This converts the Pydantic object into a normal Python dictionary.
+
+Something like:
+
+```python
+{
+    "origin": "Mumbai",
+    "destination": "Pune",
+    "bus_type": "AC Sleeper",
+    "capacity": 32,
+    ...
+}
+```
+
+---
+
+# 17. Then it calls `predict.py`
+
+This line is extremely important:
+
+```python
+from predict import predict as run_prediction
+```
+
+Then:
+
+```python
+result = run_prediction(trip_input)
+```
+
+FastAPI itself does **not** calculate:
+
+```text
+occupancy_lag
+booking_velocity
+days_left_ratio
+route average
+price ratio
+```
+
+Instead:
+
+```text
+FastAPI
+   ↓
+predict.py
+   ↓
+build_features()
+   ↓
+model_xgboost_final.pkl
+   ↓
+prediction
+```
+
+This is good architecture because your ML logic stays separate from your API logic.
+
+---
+
+# 18. Error handling
+
+```python
+try:
+    result = run_prediction(trip_input)
+```
+
+If the user gives invalid input:
+
+```python
+except ValueError as e:
+    raise HTTPException(
+        status_code=400,
+        detail=str(e)
+    )
+```
+
+The API returns:
+
+```text
+400 Bad Request
+```
+
+If there's a bug in your feature pipeline:
+
+```python
+except KeyError as e:
+    raise HTTPException(
+        status_code=500,
+        detail=f"Internal feature-building error: {e}"
+    )
+```
+
+That's:
+
+```text
+500 Internal Server Error
+```
+
+So:
+
+```text
+400 = user's request is wrong
+
+500 = your backend/model code has a problem
+```
+
+---
+
+# 19. The complete `/predict` flow
+
+This is the part you should understand for your project:
+
+```text
+                USER
+                  |
+                  | JSON
+                  ↓
+        ┌───────────────────┐
+        │      React        │
+        │   prediction form │
+        └─────────┬─────────┘
+                  |
+                  | POST /predict
+                  ↓
+        ┌───────────────────┐
+        │     FastAPI       │
+        │                   │
+        │ Validate input    │
+        └─────────┬─────────┘
+                  |
+                  ↓
+        ┌───────────────────┐
+        │     predict.py    │
+        │                   │
+        │ Build Gold        │
+        │ features          │
+        └─────────┬─────────┘
+                  |
+                  ↓
+        ┌───────────────────┐
+        │ XGBoost Final     │
+        │ Model             │
+        │ .pkl              │
+        └─────────┬─────────┘
+                  |
+                  ↓
+       Final occupancy prediction
+                  |
+                  ↓
+        Demand tier
+                  |
+                  ↓
+        Recommendation
+                  |
+                  ↓
+        ┌───────────────────┐
+        │     FastAPI       │
+        └─────────┬─────────┘
+                  |
+                  | JSON response
+                  ↓
+        ┌───────────────────┐
+        │      React        │
+        │                   │
+        │ 85.13% occupancy  │
+        │ 27 / 32 seats     │
+        │ HIGH demand       │
+        └───────────────────┘
+```
+
+---
+
+# 20. Why Step 11 is called a "thin wrapper"
+
+Your comment says:
+
+> `This file is a thin HTTP wrapper around predict.py`
+
+That is exactly right.
+
+You **don't want** to put this inside `main.py`:
+
+```python
+# calculate days_left
+# calculate occupancy
+# calculate lag
+# calculate velocity
+# calculate price ratio
+# load model
+# predict
+```
+
+Instead:
+
+```text
+main.py
+   ↓
+API responsibilities
+
+predict.py
+   ↓
+ML prediction responsibilities
+```
+
+### `main.py`
+
+Handles:
+
+```text
+HTTP
+↓
+validation
+↓
+request
+↓
+response
+```
+
+### `predict.py`
+
+Handles:
+
+```text
+input
+↓
+feature engineering
+↓
+XGBoost
+↓
+prediction
+```
+
+That's a clean separation.
+
+---
+
+# 21. What you need in your project directory
+
+At this stage, your structure should roughly be:
+
+```text
+bigproject/
+│
+├── bus_trips_master.csv
+├── bus_booking_daily.csv
+├── bus_booking_silver.csv
+│
+├── bus_features_gold.csv
+│
+├── model_xgboost_final.pkl
+├── feature_columns.json
+├── route_avg_lookup.json
+│
+├── predict.py
+├── reference_data.py
+│
+├── main.py              ← Step 11
+│
+├── model_comparison.csv
+├── model_error_by_days_left.csv
+├── xgboost_feature_importance.csv
+│
+└── ...
+```
+
+Then **Step 12** will be your React frontend:
+
+```text
+React
+  ↓
+main.py /predict
+  ↓
+predict.py
+  ↓
+XGBoost
+```
+
+---
+
+# 22. How to run Step 11
+
+From your project directory:
+
+```powershell
+cd "C:\Users\nikit\OneDrive\Desktop\bigproject"
+```
+
+Then:
+
+```powershell
+uvicorn main:app --reload --port 8000
+```
+
+You should see something like:
+
+```text
+Uvicorn running on http://127.0.0.1:8000
+```
+
+Then open:
+
+```text
+http://localhost:8000/docs
+```
+
+You should see your API documentation.
+
+### Test these first:
+
+```text
+GET /health
+```
+
+Then:
+
+```text
+GET /routes
+```
+
+Then:
+
+```text
+GET /bus-types
+```
+
+Finally:
+
+```text
+POST /predict
+```
+
+The **POST `/predict` is the actual ML endpoint**.
+
+---
+
+## One important thing before running it
+
+Your Step 11 code expects this function:
+
+```python
+from predict import predict as run_prediction
+```
+
+So your `predict.py` **must actually contain**:
+
+```python
+def predict(...):
+    ...
+```
+
+and it must return all the fields expected by:
+
+```python
+TripPredictionResponse
+```
+
+including:
+
+```text
+predicted_final_occupancy_pct
+predicted_final_seats
+capacity
+demand_tier
+recommendation
+days_left
+popularity_tier_used
+route_known_in_reference_data
+lag_feature_source
+warnings
+```
+
+If your current `predict.py` returns only:
+
+```python
+{
+    "predicted_final_occupancy_pct": ...,
+    "predicted_final_seats": ...,
+    "capacity": ...,
+    "current_occupancy_pct": ...,
+    "days_left": ...
+}
+```
+
+then **Step 11 will not work yet**, because the response schema expects additional fields.
+
+So the next practical step is:
+
+**run `main.py` → open `/docs` → test `/health` → test `/routes` → test `/bus-types` → test `/predict`.**
+
+After that, **Step 12 is the React frontend**, which will give you the actual user-facing application.
